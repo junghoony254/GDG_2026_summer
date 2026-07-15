@@ -27,67 +27,69 @@ except Exception as e:
 
 
 # ==========================================
-# [신규 기능] 기념일/디데이 연산 엔진
+# [기능 고도화 1] 검색어 형태소 정규화 및 동의어 필터링
 # ==========================================
-def calculate_anniversary_dday(keyword):
+def normalize_and_synonym_filter(keyword):
     """
-    주요 기념일 키워드가 감지되면 현재 날짜(2026년 7월 15일) 기준으로 D-Day와 요일을 자동 연산함.
+    조사('은', '는', '이', '가', '어때', '언제야' 등)를 제거하고 동의어 사전을 거쳐 대표 키워드로 정규화함.
+    예: '성탄절 언제야' -> '크리스마스'
+        '부산 날씨 어때' -> '부산 날씨'
     """
-    # 2026년 기준 주요 기념일 데이터베이스
-    anniversaries = {
-        "크리스마스": "2026-12-25",
-        "성탄절": "2026-12-25",
-        "광복절": "2026-08-15",
-        "추석": "2026-09-25", # 2026년 음력 추석 양력 기준 일자
-        "한글날": "2026-10-09",
-        "신정": "2027-01-01",
-        "새해": "2027-01-01"
+    clean_kw = keyword.strip()
+    
+    # 1. 불필요한 조사, 서술어 어미 제거 정규식
+    clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
+    clean_kw = clean_kw.strip()
+    
+    # 2. 동의어 매핑 사전
+    synonym_dict = {
+        "성탄절": "크리스마스",
+        "x-mas": "크리스마스",
+        "새해": "신정",
+        "신정": "신정",
+        "ㄴㅆ": "날씨",
+        "블로": "블로그",
+        "포스트": "블로그",
+        "뉴스기사": "뉴스",
+        "기사": "뉴스"
     }
     
-    # 요일 한글 변환 매핑
-    weekday_map = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    # 공백 단위로 쪼개어 동의어 치환 후 재조립
+    words = clean_kw.split()
+    mapped_words = [synonym_dict.get(w, w) for w in words]
+    normalized_result = " ".join(mapped_words)
     
-    target_event = None
-    for key in anniversaries.keys():
-        if key in keyword:
-            target_event = key
-            break
-            
-    if not target_event:
-        return None
+    # 전체 문장이 동의어에 있는 경우 예외 처리
+    if normalized_result in synonym_dict:
+        normalized_result = synonym_dict[normalized_result]
         
-    target_date_str = anniversaries[target_event]
-    target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
-    current_date = datetime(2026, 7, 15) # 현재 시스템 기준일 (2026년 7월 15일)
-    
-    delta = target_date - current_date
-    days_left = delta.days
-    
-    weekday_name = weekday_map[target_date.weekday()]
-    
-    if days_left > 0:
-        d_day_str = f"D-{days_left}"
-        msg = f"{target_event}까지 {days_left}일 남았습니다!"
-    elif days_left == 0:
-        d_day_str = "D-Day"
-        msg = f"오늘이 바로 즐거운 {target_event}입니다! 🎉"
-    else:
-        d_day_str = f"D+{abs(days_left)}"
-        msg = f"올해 {target_event}은(는) 이미 지났습니다."
-
-    # 이모지 자동 바인딩
-    emoji = "🎄" if "크리스마스" in target_event or "성탄절" in target_event else "🇰🇷" if "광복" in target_event else "🌕" if "추석" in target_event else "🗓️"
-
-    return {
-        "event_name": target_event,
-        "date": f"{target_date_str} ({weekday_name})",
-        "d_day": d_day_str,
-        "message": f"{msg} {emoji}"
-    }
+    return normalized_result
 
 
 # ==========================================
-# [기능 3] Redis 기반 Rate Limiter (로컬 테스트용 빡빡한 차단 세팅)
+# [기능 고도화 3] 실시간 인기 검색어 TOP 10 랭킹 집계
+# ==========================================
+def get_realtime_trending_keywords():
+    """
+    Redis의 Sorted Set을 활용하여 검색 빈도가 가장 높은 상위 10개 키워드를 실시간 반환함.
+    """
+    try:
+        # 스코어(검색 횟수) 기준 내림차순으로 상위 10개 데이터 조회
+        trending_raw = r.zrevrange("saver:popular_scores", 0, 9, withscores=True)
+        trending_list = []
+        for rank, (kw, score) in enumerate(trending_raw, 1):
+            trending_list.append({
+                "순위": rank,
+                "키워드": kw,
+                "검색횟수": int(score)
+            })
+        return trending_list
+    except Exception:
+        return []
+
+
+# ==========================================
+# [기능 3] Redis 기반 Rate Limiter
 # ==========================================
 def is_rate_limited(client_ip, limit=2, period=4):
     key = f"rate:limit:{client_ip}"
@@ -204,8 +206,59 @@ def parse_weather_city(keyword):
 
 
 # ==========================================
-# Core Search Logic
+# 기념일/디데이 연산 엔진
 # ==========================================
+def calculate_anniversary_dday(keyword):
+    anniversaries = {
+        "크리스마스": "2026-12-25",
+        "성탄절": "2026-12-25",
+        "광복절": "2026-08-15",
+        "추석": "2026-09-25",
+        "한글날": "2026-10-09",
+        "신정": "2027-01-01",
+        "새해": "2027-01-01"
+    }
+    
+    weekday_map = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    
+    target_event = None
+    for key in anniversaries.keys():
+        if key in keyword:
+            target_event = key
+            break
+            
+    if not target_event:
+        return None
+        
+    target_date_str = anniversaries[target_event]
+    target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
+    current_date = datetime(2026, 7, 15) # 기준일 고정
+    
+    delta = target_date - current_date
+    days_left = delta.days
+    
+    weekday_name = weekday_map[target_date.weekday()]
+    
+    if days_left > 0:
+        d_day_str = f"D-{days_left}"
+        msg = f"{target_event}까지 {days_left}일 남았습니다!"
+    elif days_left == 0:
+        d_day_str = "D-Day"
+        msg = f"오늘이 바로 즐거운 {target_event}입니다! 🎉"
+    else:
+        d_day_str = f"D+{abs(days_left)}"
+        msg = f"올해 {target_event}은(는) 이미 지났습니다."
+
+    emoji = "🎄" if "크리스마스" in target_event or "성탄절" in target_event else "🇰🇷" if "광복" in target_event else "🌕" if "추석" in target_event else "🗓️"
+
+    return {
+        "event_name": target_event,
+        "date": f"{target_date_str} ({weekday_name})",
+        "d_day": d_day_str,
+        "message": f"{msg} {emoji}"
+    }
+
+
 def evaluate_math_expression(keyword):
     clean_keyword = keyword.replace(" ", "")
     clean_keyword = re.sub(r'의?세제곱', '**3', clean_keyword)
@@ -259,23 +312,46 @@ def detect_user_intent(keyword):
                 }
     return None
 
-def get_saver_search_result(keyword, client_ip="127.0.0.1"):
-    # [기능 3] Rate Limit 적용
+
+# ==========================================
+# Core Search Logic (위치별 캐싱 및 인기 검색어 랭킹 탑재)
+# ==========================================
+def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
+    # [Rate Limit 적용]
     if is_rate_limited(client_ip, limit=2, period=4):
         return {
             "error": "Too Many Requests",
             "message": "너무 빠른 검색 요청이 감지되었습니다. 잠시 후 다시 시도해 주세요 (4초 내 최대 2회 제한)."
         }
 
-    keyword = keyword.strip()
-    print(f"\n[검색엔진 가동] 유저 입력 키워드: '{keyword}' (IP: {client_ip})")
+    # [고도화 1] 검색어 형태소 정규화 및 동의어 처리
+    keyword = normalize_and_synonym_filter(raw_keyword)
+    print(f"\n[검색엔진 가동] 원본: '{raw_keyword}' ➡️ 정규화: '{keyword}' (IP: {client_ip})")
+    
     start_time = time.time()
+    
+    # [고도화 2] Redis 검색 캐싱 검증 (Cache Hit 레이어)
+    cache_key = f"saver:cache:{keyword}"
+    try:
+        cached_data = r.get(cache_key)
+        if cached_data:
+            latency = (time.time() - start_time) * 1000
+            result_json = json.loads(cached_data)
+            # 캐시 응답 속도를 명시하고 반환
+            result_json["SAVER_Special_Search"]["검색속도"] = f"{latency:.2f}ms (Cache Hit)"
+            # 캐시가 조회되었어도 실시간 랭킹 가중치는 갱신
+            r.zincrby("saver:popular_scores", 1, keyword)
+            return result_json
+    except Exception as e:
+        print(f"⚠️ [캐싱 에러] Redis 읽기 실패: {e}")
+
+    # --- Cache Miss 구간 (원래 검색 로직 수행) ---
     
     # 1. 계산기 기능 우선 처리
     math_result = evaluate_math_expression(keyword)
     if math_result:
         latency = (time.time() - start_time) * 1000
-        return {
+        output = {
             "SAVER_Special_Search": {
                 "검색속도": f"{latency:.2f}ms",
                 "타입": "calculator",
@@ -284,6 +360,7 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
                 "연관_검색어_추천": []
             }
         }
+        return output
 
     # 2. 유저 검색 의도 분석 처리
     user_intent = detect_user_intent(keyword)
@@ -291,20 +368,16 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
     # 3. 특정 서비스 추천(의도)이 확실히 감지되었다면 처리
     if user_intent:
         realtime_widget_data = None
-        
-        # [기능 2] 동적 날씨 탑재
         if user_intent["target_id"] == "weather":
             target_city = parse_weather_city(keyword)
             realtime_widget_data = get_realtime_weather(target_city)
-            
-        # [신규 기능] 기념일/디데이 연산 데이터 탑재
         elif user_intent["target_id"] == "anniversary":
             realtime_widget_data = calculate_anniversary_dday(keyword)
 
         latency = (time.time() - start_time) * 1000
         related_keywords = search_autocomplete(keyword)
         
-        return {
+        output = {
             "SAVER_Special_Search": {
                 "검색속도": f"{latency:.2f}ms",
                 "타입": "recommend",
@@ -321,6 +394,14 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
                 "연관_검색어_추천": related_keywords
             }
         }
+        
+        # [고도화 2] 연산 결과 Redis 캐싱 등록 (TTL: 60초)
+        try:
+            r.setex(cache_key, 60, json.dumps(output))
+        except Exception:
+            pass
+            
+        return output
 
     # 4. 일반 키워드 자동완성 탐색
     related_keywords = search_autocomplete(keyword)
@@ -356,7 +437,7 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
                 "요약본(100자)": "데이터베이스 내에 매칭되는 본문이 없습니다."
             }
             
-        # 검색에 성공한 단어는 동적으로 Redis에 캐싱
+        # 스코어 누적 및 자소 사전 등록
         r.zincrby("saver:popular_scores", 1, keyword)
         r.hset("saver:autocomplete:jamo_map", get_jamo_string(keyword), keyword)
             
@@ -365,7 +446,7 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
 
     latency = (time.time() - start_time) * 1000
 
-    return {
+    output = {
         "SAVER_Special_Search": {
             "검색속도": f"{latency:.2f}ms",
             "타입": "search",
@@ -374,22 +455,47 @@ def get_saver_search_result(keyword, client_ip="127.0.0.1"):
             "연관_검색어_추천": related_keywords
         }
     }
+    
+    # [고도화 2] 결과 캐싱 등록 (60초 만료)
+    try:
+        r.setex(cache_key, 60, json.dumps(output))
+    except Exception:
+        pass
+
+    return output
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Hyper-Optimized Search Engine v4.2 (Anniversary Integrated)")
+    print("⚡ SAVER Hyper-Optimized Search Engine v5.0 (Ultimate Edition)")
     print("=" * 60)
     
     try:
         while True:
-            user_input = input("\n🟢 검색 키워드를 입력하세요 (종료: exit): ").strip()
-            if not user_input:
+            print("\n" + "-"*40)
+            print("1. 검색하기 | 2. 실시간 인기 검색어 랭킹 보기 | 3. 종료 (exit)")
+            menu = input("👉 메뉴 번호 또는 키워드를 입력하세요: ").strip()
+            
+            if not menu:
                 continue
-            if user_input.lower() == 'exit':
-                print("👋 백엔드 검색 엔진 시뮬레이터를 종료합니다.")
+            if menu.lower() == 'exit' or menu == '3':
+                print("👋 검색 백엔드 코어 시스템을 안전하게 종료합니다.")
                 break
                 
-            final_output = get_saver_search_result(user_input, client_ip="127.0.0.1")
+            if menu == '2':
+                # [고도화 3] 실시간 인기 랭킹 확인 메뉴
+                ranking = get_realtime_trending_keywords()
+                print("\n🔥 [SAVER 실시간 인기 검색어 TOP 10] 🔥")
+                for rank_item in ranking:
+                    print(f"[{rank_item['순위']}위] {rank_item['키워드']} (검색 수: {rank_item['검색횟수']}회)")
+                print("-"*40)
+                continue
+            
+            # 1번 메뉴 혹은 키워드 직접 입력 처리
+            search_keyword = menu if menu != '1' else input("🔍 검색 키워드 입력: ").strip()
+            if not search_keyword:
+                continue
+                
+            final_output = get_saver_search_result(search_keyword, client_ip="127.0.0.1")
             
             if final_output:
                 print("\n" + "="*20 + " [프론트엔드 전달 API 응답 예시] " + "="*20)
