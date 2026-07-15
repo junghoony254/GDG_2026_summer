@@ -1,3 +1,4 @@
+import re
 import redis
 import psycopg2
 import json
@@ -18,12 +19,75 @@ except Exception as e:
     print(f"❌ 인프라 연결 실패: {e}")
     exit()
 
+def evaluate_math_expression(keyword):
+    clean_keyword = keyword.replace(" ", "")
+    clean_keyword = re.sub(r'의?세제곱', '**3', clean_keyword)
+    clean_keyword = re.sub(r'의?제곱', '**2', clean_keyword)
+    
+    math_pattern = r'^[\d+\-*/().\s]+$'
+    
+    if re.match(math_pattern, clean_keyword):
+        try:
+            result = eval(clean_keyword)
+            if isinstance(result, (int, float)):
+                return {
+                    "type": "calculator",
+                    "expression": keyword,
+                    "result": str(result)
+                }
+        except Exception:
+            return None
+    return None
+
+def detect_user_intent(keyword):
+    intent_map = {
+        "blog": {
+            "keywords": ["블로그", "글", "게시물", "포스트"],
+            "msg": "블로그 탭에서 다양한 후기와 포스트를 확인해보세요!"
+        },
+        "weather": {
+            "keywords": ["날씨", "기온", "비", "우산", "날씨 어때", "온도"],
+            "msg": "날씨 탭에서 실시간 전국 기상 정보를 확인해보세요!"
+        },
+        "news": {
+            "keywords": ["뉴스", "기사", "소식", "신문", "보도"],
+            "msg": "뉴스 탭에서 HUFS 및 청년 창업 최신 뉴스를 확인해보세요!"
+        }
+    }
+    
+    for target_id, info in intent_map.items():
+        for kw in info["keywords"]:
+            if kw in keyword:
+                return {
+                    "target_id": target_id,
+                    "recommend_message": info["msg"]
+                }
+    return None
+
 def get_saver_search_result(keyword):
     keyword = keyword.strip()
     print(f"\n[검색엔진 가동] 유저 입력 키워드: '{keyword}'")
     
     start_time = time.time()
     
+    # 1. 계산기 기능 우선 처리
+    math_result = evaluate_math_expression(keyword)
+    if math_result:
+        latency = (time.time() - start_time) * 1000
+        return {
+            "SAVER_Special_Search": {
+                "검색속도": f"{latency:.2f}ms",
+                "타입": "calculator",
+                "결과": math_result,
+                "추천_결과": None,
+                "연관_검색어_추천": []
+            }
+        }
+
+    # 2. 유저 검색 의도 분석(서비스 추천) 처리
+    user_intent = detect_user_intent(keyword)
+
+    # 3. 연관 검색어 구현 (Valkey/Redis 인메모리 연산)
     try:
         r.zincrby("saver:popular_scores", 1, keyword)
         all_keywords = r.zrevrange("saver:popular_scores", 0, -1)
@@ -34,6 +98,7 @@ def get_saver_search_result(keyword):
     if not related_keywords:
         related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
 
+    # 4. 내부 컨텐츠 통합 고속 검색 (PostgreSQL GIN Trigram)
     best_result = None
     try:
         query = """
@@ -70,14 +135,16 @@ def get_saver_search_result(keyword):
     return {
         "SAVER_Special_Search": {
             "검색속도": f"{latency:.2f}ms",
+            "타입": "search",
             "최선의_결과": best_result,
+            "추천_결과": user_intent,
             "연관_검색어_추천": related_keywords
         }
     }
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Hyper-Optimized Search Engine v3.0 (Trigram Indexing)")
+    print("⚡ SAVER Hyper-Optimized Search Engine v3.1")
     print("=" * 60)
     
     try:
