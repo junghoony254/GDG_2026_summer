@@ -87,7 +87,25 @@ def get_saver_search_result(keyword):
     # 2. 유저 검색 의도 분석(서비스 추천) 처리
     user_intent = detect_user_intent(keyword)
 
-    # 3. 연관 검색어 구현 (Valkey/Redis 인메모리 연산)
+    # 3. 특정 서비스 추천(의도)이 확실히 감지되었다면, 무거운 DB 검색을 생략하고 즉시 반환
+    if user_intent:
+        latency = (time.time() - start_time) * 1000
+        related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
+        return {
+            "SAVER_Special_Search": {
+                "검색속도": f"{latency:.2f}ms",
+                "타입": "recommend",
+                "최선의_결과": {
+                    "게시처": "Widget",
+                    "제목": f"{user_intent['target_id'].upper()} 추천 서비스 제공",
+                    "요약본(100자)": user_intent['recommend_message']
+                },
+                "추천_결과": user_intent,
+                "연관_검색어_추천": related_keywords
+            }
+        }
+
+    # 4. 연관 검색어 구현 (Valkey/Redis 인메모리 연산)
     try:
         r.zincrby("saver:popular_scores", 1, keyword)
         all_keywords = r.zrevrange("saver:popular_scores", 0, -1)
@@ -98,7 +116,7 @@ def get_saver_search_result(keyword):
     if not related_keywords:
         related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
 
-    # 4. 내부 컨텐츠 통합 고속 검색 (PostgreSQL GIN Trigram)
+    # 5. 일반 키워드인 경우에만 기존처럼 PostgreSQL GIN DB 통합 검색 수행
     best_result = None
     try:
         query = """
@@ -144,7 +162,7 @@ def get_saver_search_result(keyword):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Hyper-Optimized Search Engine v3.1")
+    print("⚡ SAVER Hyper-Optimized Search Engine v3.2")
     print("=" * 60)
     
     try:
