@@ -3,9 +3,6 @@ import psycopg2
 import json
 import time
 
-# ====================================================
-# 🔌 [하이퍼 최적화] 글로벌 커넥션 초기화
-# ====================================================
 r = None
 pg_conn = None
 pg_cursor = None
@@ -22,15 +19,11 @@ except Exception as e:
     exit()
 
 def get_saver_search_result(keyword):
-    # 💡 최적화: 유저 입력에 불필요한 공백 제거
     keyword = keyword.strip()
     print(f"\n[검색엔진 가동] 유저 입력 키워드: '{keyword}'")
     
     start_time = time.time()
     
-    # ----------------------------------------------------
-    # 로직 A: [연관 검색어] 구현 (Valkey/Redis 인메모리 고속 연산)
-    # ----------------------------------------------------
     try:
         r.zincrby("saver:popular_scores", 1, keyword)
         all_keywords = r.zrevrange("saver:popular_scores", 0, -1)
@@ -41,12 +34,8 @@ def get_saver_search_result(keyword):
     if not related_keywords:
         related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
 
-    # ----------------------------------------------------
-    # 로직 B: [최선의 결과] 구현 (GIN Trigram Index 기반 초고속 검색)
-    # ----------------------------------------------------
     best_result = None
     try:
-        # 방금 생성한 트라이그램 인덱스를 활용하여 디스크 블록 전체를 스캔하지 않고 타겟 데이터만 즉시 타격
         query = """
             SELECT 'hufspress' as source, title, content FROM hufspress WHERE title LIKE %s OR content LIKE %s
             UNION ALL
@@ -76,7 +65,6 @@ def get_saver_search_result(keyword):
     except Exception as e:
         print(f"❌ [디비 에러] {e}")
 
-    # 모든 내부 IO 오버헤드가 사라진 순수 메모리/인덱스 연산 속도
     latency = (time.time() - start_time) * 1000
 
     return {
