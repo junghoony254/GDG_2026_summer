@@ -4,6 +4,8 @@ import psycopg2
 import json
 import time
 import requests
+from datetime import datetime
+from jamo import h2j, j2hcj
 
 r = None
 pg_conn = None
@@ -23,31 +25,156 @@ except Exception as e:
     print(f"❌ 인프라 연결 실패: {e}")
     exit()
 
-def get_realtime_weather():
+
+# ==========================================
+# [신규 기능] 기념일/디데이 연산 엔진
+# ==========================================
+def calculate_anniversary_dday(keyword):
     """
-    OpenWeatherMap API를 사용해 서울의 실시간 날씨를 가져옴.
-    API 키가 없거나 에러 발생 시 최신 업데이트된 날짜 기준의 고품질 모크 데이터를 반환함.
+    주요 기념일 키워드가 감지되면 현재 날짜(2026년 7월 15일) 기준으로 D-Day와 요일을 자동 연산함.
     """
+    # 2026년 기준 주요 기념일 데이터베이스
+    anniversaries = {
+        "크리스마스": "2026-12-25",
+        "성탄절": "2026-12-25",
+        "광복절": "2026-08-15",
+        "추석": "2026-09-25", # 2026년 음력 추석 양력 기준 일자
+        "한글날": "2026-10-09",
+        "신정": "2027-01-01",
+        "새해": "2027-01-01"
+    }
+    
+    # 요일 한글 변환 매핑
+    weekday_map = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    
+    target_event = None
+    for key in anniversaries.keys():
+        if key in keyword:
+            target_event = key
+            break
+            
+    if not target_event:
+        return None
+        
+    target_date_str = anniversaries[target_event]
+    target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
+    current_date = datetime(2026, 7, 15) # 현재 시스템 기준일 (2026년 7월 15일)
+    
+    delta = target_date - current_date
+    days_left = delta.days
+    
+    weekday_name = weekday_map[target_date.weekday()]
+    
+    if days_left > 0:
+        d_day_str = f"D-{days_left}"
+        msg = f"{target_event}까지 {days_left}일 남았습니다!"
+    elif days_left == 0:
+        d_day_str = "D-Day"
+        msg = f"오늘이 바로 즐거운 {target_event}입니다! 🎉"
+    else:
+        d_day_str = f"D+{abs(days_left)}"
+        msg = f"올해 {target_event}은(는) 이미 지났습니다."
+
+    # 이모지 자동 바인딩
+    emoji = "🎄" if "크리스마스" in target_event or "성탄절" in target_event else "🇰🇷" if "광복" in target_event else "🌕" if "추석" in target_event else "🗓️"
+
+    return {
+        "event_name": target_event,
+        "date": f"{target_date_str} ({weekday_name})",
+        "d_day": d_day_str,
+        "message": f"{msg} {emoji}"
+    }
+
+
+# ==========================================
+# [기능 3] Redis 기반 Rate Limiter (로컬 테스트용 빡빡한 차단 세팅)
+# ==========================================
+def is_rate_limited(client_ip, limit=2, period=4):
+    key = f"rate:limit:{client_ip}"
+    try:
+        current_requests = r.get(key)
+        if current_requests and int(current_requests) >= limit:
+            return True
+        
+        pipeline = r.pipeline()
+        pipeline.incr(key)
+        pipeline.expire(key, period)
+        pipeline.execute()
+    except Exception as e:
+        print(f"⚠️ [Rate Limiter 경고] Redis 연산 실패: {e}")
+    return False
+
+
+# ==========================================
+# [기능 1] 초성 분리 및 오타 교정 정밀 엔진
+# ==========================================
+def get_jamo_string(text):
+    return j2hcj(h2j(text))
+
+def initialize_autocomplete_database():
+    sample_keywords = ["날씨", "오늘 날씨", "날씨 정보", "블로그 포스트", "최신 뉴스", "계산기", "기념일", "크리스마스 날짜"]
+    try:
+        for kw in sample_keywords:
+            jamo_key = get_jamo_string(kw)
+            r.hset("saver:autocomplete:jamo_map", jamo_key, kw)
+            r.zadd("saver:popular_scores", {kw: 1})
+    except Exception as e:
+        print(f"⚠️ 자동완성 사전 초기화 실패: {e}")
+
+initialize_autocomplete_database()
+
+
+def search_autocomplete(keyword):
+    input_jamo = get_jamo_string(keyword)
+    suggestions = []
+    
+    try:
+        all_jamos = r.hgetall("saver:autocomplete:jamo_map")
+        for j_key, real_val in all_jamos.items():
+            if input_jamo in j_key:
+                suggestions.append(real_val)
+                
+        populars = r.zrevrange("saver:popular_scores", 0, -1)
+        for p_kw in populars:
+            if keyword in p_kw and p_kw not in suggestions:
+                suggestions.append(p_kw)
+    except Exception:
+        pass
+        
+    return suggestions[:5]
+
+
+# ==========================================
+# [기능 2] 다중 지역 동적 날씨 제공 엔진
+# ==========================================
+def get_realtime_weather(city_name="Seoul"):
+    city_map = {
+        "서울": "Seoul", "부산": "Busan", "인천": "Incheon", 
+        "대구": "Daegu", "대전": "Daejeon", "광주": "Gwangju", 
+        "울산": "Ulsan", "제주": "Jeju"
+    }
+    
+    target_city_en = city_map.get(city_name, "Seoul")
+    target_city_ko = city_name if city_name in city_map else "서울시"
+
     if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "YOUR_API_KEY_HERE":
-        # API 키가 설정되지 않았을 때 반환할 스마트 모크 데이터
         return {
-            "location": "서울시",
-            "temperature": "24.5°C",
-            "status": "흐림 (Rainy)",
-            "humidity": "85%",
-            "wind_speed": "3.2 m/s",
+            "location": target_city_ko,
+            "temperature": "22.1°C" if city_name == "부산" else "24.5°C",
+            "status": "비 (Rainy)" if city_name == "부산" else "흐림 (Cloudy)",
+            "humidity": "90%" if city_name == "부산" else "85%",
+            "wind_speed": "4.1 m/s" if city_name == "부산" else "3.2 m/s",
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "source": "Mock (API Key Missing)"
+            "source": f"Mock ({target_city_ko} 매칭 완공)"
         }
     
-    # 실제 API 호출 구간 (도시: 서울)
-    url = f"https://api.openweathermap.org/data/2.5/weather?q=Seoul&appid={OPENWEATHER_API_KEY}&units=metric&lang=kr"
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={target_city_en}&appid={OPENWEATHER_API_KEY}&units=metric&lang=kr"
     try:
         response = requests.get(url, timeout=3)
         if response.status_code == 200:
             data = response.json()
             return {
-                "location": "서울시",
+                "location": target_city_ko,
                 "temperature": f"{data['main']['temp']:.1f}°C",
                 "status": data['weather'][0]['description'],
                 "humidity": f"{data['main']['humidity']}%",
@@ -56,26 +183,34 @@ def get_realtime_weather():
                 "source": "OpenWeatherMap API"
             }
         else:
-            raise Exception("API Response Error")
+            raise Exception()
     except Exception:
-        # API 호출 중 타임아웃이나 에러 발생 시 Fallback 데이터로 방어
         return {
-            "location": "서울시",
+            "location": target_city_ko,
             "temperature": "24.5°C",
-            "status": "흐림 (Rainy)",
+            "status": "기상청 통신 제한",
             "humidity": "85%",
             "wind_speed": "3.2 m/s",
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "source": "Fallback (Connection Timeout)"
+            "source": "Fallback"
         }
 
+def parse_weather_city(keyword):
+    cities = ["서울", "부산", "인천", "대구", "대전", "광주", "울산", "제주"]
+    for city in cities:
+        if city in keyword:
+            return city
+    return "서울"
+
+
+# ==========================================
+# Core Search Logic
+# ==========================================
 def evaluate_math_expression(keyword):
     clean_keyword = keyword.replace(" ", "")
     clean_keyword = re.sub(r'의?세제곱', '**3', clean_keyword)
     clean_keyword = re.sub(r'의?제곱', '**2', clean_keyword)
-    
     math_pattern = r'^[\d+\-*/().\s]+$'
-    
     if re.match(math_pattern, clean_keyword):
         try:
             result = eval(clean_keyword)
@@ -96,16 +231,26 @@ def detect_user_intent(keyword):
             "msg": "블로그 탭에서 다양한 후기와 포스트를 확인해보세요!"
         },
         "weather": {
-            "keywords": ["날씨", "기온", "비", "우산", "날씨 어때", "온도"],
+            "keywords": ["날씨", "기온", "비", "우산", "날씨 어때", "온도", "ㄴㅆ"],
             "msg": "날씨 탭에서 실시간 전국 기상 정보를 확인해보세요!"
         },
         "news": {
             "keywords": ["뉴스", "기사", "소식", "신문", "보도"],
             "msg": "뉴스 탭에서 HUFS 및 청년 창업 최신 뉴스를 확인해보세요!"
+        },
+        "anniversary": {
+            "keywords": ["크리스마스", "성탄절", "광복절", "추석", "한글날", "신정", "새해", "기념일", "디데이"],
+            "msg": "기념일 탭에서 다가오는 공휴일과 디데이 일정을 확인해보세요!"
         }
     }
     
+    jamo_keyword = get_jamo_string(keyword)
     for target_id, info in intent_map.items():
+        if target_id == "weather" and "ㄴㅆ" in jamo_keyword:
+            return {
+                "target_id": "weather",
+                "recommend_message": info["msg"]
+            }
         for kw in info["keywords"]:
             if kw in keyword:
                 return {
@@ -114,10 +259,16 @@ def detect_user_intent(keyword):
                 }
     return None
 
-def get_saver_search_result(keyword):
+def get_saver_search_result(keyword, client_ip="127.0.0.1"):
+    # [기능 3] Rate Limit 적용
+    if is_rate_limited(client_ip, limit=2, period=4):
+        return {
+            "error": "Too Many Requests",
+            "message": "너무 빠른 검색 요청이 감지되었습니다. 잠시 후 다시 시도해 주세요 (4초 내 최대 2회 제한)."
+        }
+
     keyword = keyword.strip()
-    print(f"\n[검색엔진 가동] 유저 입력 키워드: '{keyword}'")
-    
+    print(f"\n[검색엔진 가동] 유저 입력 키워드: '{keyword}' (IP: {client_ip})")
     start_time = time.time()
     
     # 1. 계산기 기능 우선 처리
@@ -134,18 +285,25 @@ def get_saver_search_result(keyword):
             }
         }
 
-    # 2. 유저 검색 의도 분석(서비스 추천) 처리
+    # 2. 유저 검색 의도 분석 처리
     user_intent = detect_user_intent(keyword)
 
     # 3. 특정 서비스 추천(의도)이 확실히 감지되었다면 처리
     if user_intent:
-        # [고도화 추가] 만약 감지된 의도가 'weather' 라면 실시간 날씨 데이터 직접 탑재
-        realtime_weather_data = None
+        realtime_widget_data = None
+        
+        # [기능 2] 동적 날씨 탑재
         if user_intent["target_id"] == "weather":
-            realtime_weather_data = get_realtime_weather()
+            target_city = parse_weather_city(keyword)
+            realtime_widget_data = get_realtime_weather(target_city)
+            
+        # [신규 기능] 기념일/디데이 연산 데이터 탑재
+        elif user_intent["target_id"] == "anniversary":
+            realtime_widget_data = calculate_anniversary_dday(keyword)
 
         latency = (time.time() - start_time) * 1000
-        related_keywords = [f"{keyword} 추천", f"{keyword} 현재 상황", f"실시간 {keyword}"]
+        related_keywords = search_autocomplete(keyword)
+        
         return {
             "SAVER_Special_Search": {
                 "검색속도": f"{latency:.2f}ms",
@@ -158,24 +316,18 @@ def get_saver_search_result(keyword):
                 "추천_결과": {
                     "target_id": user_intent["target_id"],
                     "recommend_message": user_intent["recommend_message"],
-                    "realtime_data": realtime_weather_data  # 실시간 데이터 실어 보내기
+                    "realtime_data": realtime_widget_data
                 },
                 "연관_검색어_추천": related_keywords
             }
         }
 
-    # 4. 연관 검색어 구현 (Valkey/Redis 인메모리 연산)
-    try:
-        r.zincrby("saver:popular_scores", 1, keyword)
-        all_keywords = r.zrevrange("saver:popular_scores", 0, -1)
-        related_keywords = [kw for kw in all_keywords if keyword in kw and kw != keyword][:5]
-    except Exception:
-        related_keywords = []
-        
+    # 4. 일반 키워드 자동완성 탐색
+    related_keywords = search_autocomplete(keyword)
     if not related_keywords:
         related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
 
-    # 5. 일반 키워드인 경우에만 기존처럼 PostgreSQL GIN DB 통합 검색 수행
+    # 5. 일반 키워드인 경우 PostgreSQL GIN DB 통합 검색 수행
     best_result = None
     try:
         query = """
@@ -204,6 +356,10 @@ def get_saver_search_result(keyword):
                 "요약본(100자)": "데이터베이스 내에 매칭되는 본문이 없습니다."
             }
             
+        # 검색에 성공한 단어는 동적으로 Redis에 캐싱
+        r.zincrby("saver:popular_scores", 1, keyword)
+        r.hset("saver:autocomplete:jamo_map", get_jamo_string(keyword), keyword)
+            
     except Exception as e:
         print(f"❌ [디비 에러] {e}")
 
@@ -221,7 +377,7 @@ def get_saver_search_result(keyword):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Hyper-Optimized Search Engine v3.3 (Weather API Enabled)")
+    print("⚡ SAVER Hyper-Optimized Search Engine v4.2 (Anniversary Integrated)")
     print("=" * 60)
     
     try:
@@ -233,7 +389,7 @@ if __name__ == "__main__":
                 print("👋 백엔드 검색 엔진 시뮬레이터를 종료합니다.")
                 break
                 
-            final_output = get_saver_search_result(user_input)
+            final_output = get_saver_search_result(user_input, client_ip="127.0.0.1")
             
             if final_output:
                 print("\n" + "="*20 + " [프론트엔드 전달 API 응답 예시] " + "="*20)
