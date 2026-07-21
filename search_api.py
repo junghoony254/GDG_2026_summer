@@ -4,7 +4,7 @@ import psycopg2
 import json
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from jamo import h2j, j2hcj
 
 r = None
@@ -64,7 +64,9 @@ def get_levenshtein_distance(s1, s2):
 # ==========================================
 def normalize_and_synonym_filter(keyword):
     clean_kw = keyword.strip()
-    clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
+    # '현재 시간', '몇시' 등은 의도 분석을 위해 함부로 자르지 않도록 예외 처리
+    if not any(w in clean_kw for w in ["시간", "몇시", "시차", "현재"]):
+        clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
     clean_kw = clean_kw.strip()
     
     synonym_dict = {
@@ -103,7 +105,7 @@ def correct_typo_fuzzy(keyword):
                 score = r.zscore("saver:popular_scores", real_val)
                 score = int(score) if score else 0
                 
-                if real_val in ["날씨", "크리스마스", "학사", "캠퍼스", "뉴스", "블로그"]:
+                if real_val in ["날씨", "크리스마스", "학사", "캠퍼스", "뉴스", "블로그", "시간"]:
                     score += 1000
                 
                 if dist < min_distance:
@@ -154,12 +156,8 @@ def evaluate_math_expression_ai(keyword):
 
 
 def fallback_math_expression(keyword):
-    """
-    모든 한글 변형 어미와 수사를 유연하게 수식으로 정밀 파싱하는 엔진
-    """
     numbers = re.findall(r'\d+', keyword)
     
-    # 한글 수사 지원
     korean_num_map = {"둘이서": "2", "셋이서": "3", "네명이서": "4", "여섯이서": "6", "반띵": "2", "삼등분": "3"}
     for k_word, num_str in korean_num_map.items():
         if k_word in keyword and len(numbers) == 1:
@@ -169,19 +167,14 @@ def fallback_math_expression(keyword):
         num1, num2 = numbers[0], numbers[1]
         
         op = None
-        # 1. 거듭제곱 / 제곱 우선 판별 ("N번 곱", "제곱", "**")
         if any(w in keyword for w in ["번 곱", "번곱", "제곱", "거듭제곱", "**"]):
             op = "**"
-        # 2. 일반 나누기
         elif any(w in keyword for w in ["나누", "나눠", "분", "쪼개", "N빵", "n빵", "/", "등분"]):
             op = "/"
-        # 3. 일반 곱하기
         elif any(w in keyword for w in ["곱", "배", "*"]):
             op = "*"
-        # 4. 더하기
         elif any(w in keyword for w in ["더", "합", "플러스", "+"]):
             op = "+"
-        # 5. 빼기
         elif any(w in keyword for w in ["빼", "차", "마이너스", "-"]):
             op = "-"
 
@@ -198,6 +191,44 @@ def fallback_math_expression(keyword):
             except Exception:
                 return None
     return None
+
+
+# ==========================================
+# [신규 기능 추가] 세계 시간 / 시차 계산 연산 엔진
+# ==========================================
+def get_world_time(city_name="서울"):
+    # UTC 타임존 오프셋 설정 (서머타임 미적용 기준 기본값)
+    tz_map = {
+        "서울": 9, "부산": 9, "인천": 9, "대구": 9, "대전": 9, "광주": 9, "제주": 9,
+        "도쿄": 9,
+        "베이징": 8, "상하이": 8, "싱가포르": 8,
+        "방콕": 7,
+        "두바이": 4,
+        "파리": 2, "런던": 1,
+        "뉴욕": -4, "LA": -7, "로스앤젤레스": -7,
+        "시드니": 10
+    }
+    
+    target_city = city_name if city_name in tz_map else "서울"
+    target_offset = tz_map[target_city]
+    
+    # UTC 현재 시각 기준 계산
+    utc_now = datetime.now(timezone.utc)
+    target_time = utc_now + timedelta(hours=target_offset)
+    
+    # 한국(UTC+9)과의 시차 계산
+    time_diff = target_offset - 9
+    diff_str = "한국과 동일" if time_diff == 0 else f"한국보다 {abs(time_diff)}시간 " + ("빠름" if time_diff > 0 else "느림")
+    
+    weekday_map = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    weekday_str = weekday_map[target_time.weekday()]
+
+    return {
+        "location": target_city,
+        "current_time": target_time.strftime("%Y-%m-%d %H:%M:%S") + f" ({weekday_str})",
+        "timezone": f"UTC{'+' if target_offset >= 0 else ''}{target_offset}",
+        "time_difference": diff_str
+    }
 
 
 # ==========================================
@@ -255,7 +286,7 @@ def get_realtime_weather(city_name="Seoul"):
     }
 
 
-def parse_weather_city(keyword):
+def parse_city_name(keyword):
     cities = [
         "서울", "부산", "인천", "대구", "대전", "광주", "울산", "제주", 
         "뉴욕", "런던", "도쿄", "파리", "베이징", "시드니", "상하이", 
@@ -322,7 +353,7 @@ def initialize_autocomplete_database():
     master_keywords = {
         "날씨": 1000, "오늘 날씨": 1000, "날씨 정보": 1000, 
         "블로그 포스트": 1000, "최신 뉴스": 1000, "계산기": 1000, 
-        "기념일": 1000, "크리스마스": 1000, "학사": 1000, "캠퍼스": 1000
+        "기념일": 1000, "크리스마스": 1000, "학사": 1000, "캠퍼스": 1000, "시간": 1000
     }
     
     try:
@@ -441,6 +472,10 @@ def detect_user_intent(keyword):
             "keywords": ["날씨", "기온", "비", "우산", "날씨 어때", "온도", "ㄴㅆ"],
             "msg": "날씨 탭에서 실시간 전국 기상 정보를 확인해보세요!"
         },
+        "time": {
+            "keywords": ["시간", "현재 시간", "현재시간", "몇시", "시차", "지금 몇시"],
+            "msg": "시간 탭에서 실시간 주요 도시 시각 및 시차 정보를 확인해보세요!"
+        },
         "news": {
             "keywords": ["뉴스", "기사", "소식", "신문", "보도"],
             "msg": "뉴스 탭에서 HUFS 및 청년 창업 최신 뉴스를 확인해보세요!"
@@ -508,14 +543,17 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
     except Exception:
         pass
 
-    # 2. 의도 분석 처리 및 날씨/디데이 바인딩
+    # 2. 의도 분석 처리 및 날씨/디데이/시간 바인딩
     user_intent = detect_user_intent(keyword)
 
     if user_intent:
         realtime_widget_data = None
+        target_city = parse_city_name(keyword)
+        
         if user_intent["target_id"] == "weather":
-            target_city = parse_weather_city(keyword)
             realtime_widget_data = get_realtime_weather(target_city)
+        elif user_intent["target_id"] == "time":
+            realtime_widget_data = get_world_time(target_city)
         elif user_intent["target_id"] == "anniversary":
             realtime_widget_data = calculate_anniversary_dday(keyword)
 
@@ -608,7 +646,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Search Engine v5.8 (Universal Math Parser)")
+    print("⚡ SAVER Search Engine v5.9 (World Time Widget Edition)")
     print("=" * 60)
     
     try:
