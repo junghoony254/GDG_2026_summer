@@ -11,14 +11,24 @@ r = None
 pg_conn = None
 pg_cursor = None
 
-# OpenWeatherMap API 키 (가입 후 발급받은 키가 있다면 여기에 입력, 없어도 모크 데이터로 작동함)
+# ==========================================
+# [인프라 API 키 설정]
+# ==========================================
 OPENWEATHER_API_KEY = "YOUR_API_KEY_HERE"
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
 
 try:
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    r = redis.Redis(
+        host='localhost', 
+        port=6379, 
+        db=0, 
+        decode_responses=True
+    )
     r.ping()
     
-    pg_conn = psycopg2.connect("postgresql://postgres:postgres@localhost:15432/postgres")
+    pg_conn = psycopg2.connect(
+        "postgresql://postgres:postgres@localhost:15432/postgres"
+    )
     pg_cursor = pg_conn.cursor()
     print("✅ [인프라 상시 커넥션 수립 완료]")
 except Exception as e:
@@ -30,9 +40,6 @@ except Exception as e:
 # [알고리즘] 레벤슈타인 편집 거리 알고리즘 (DP 기반)
 # ==========================================
 def get_levenshtein_distance(s1, s2):
-    """
-    두 자소 분리 문자열 간의 최소 편집 거리를 Dynamic Programming(DP)으로 연산함.
-    """
     if len(s1) < len(s2):
         return get_levenshtein_distance(s2, s1)
 
@@ -53,19 +60,13 @@ def get_levenshtein_distance(s1, s2):
 
 
 # ==========================================
-# [기능 고도화 1] 검색어 형태소 정규화 및 가중치 기반 오타 교정 (Fuzzy Weight System)
+# [기능 고도화 1] 검색어 형태소 정규화 및 오타 교정
 # ==========================================
 def normalize_and_synonym_filter(keyword):
-    """
-    조사 제거 및 동의어 필터링을 진행함.
-    """
     clean_kw = keyword.strip()
-    
-    # 1. 불필요한 조사, 서술어 어미 제거 정규식
     clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
     clean_kw = clean_kw.strip()
     
-    # 2. 동의어 매핑 사전
     synonym_dict = {
         "성탄절": "크리스마스",
         "x-mas": "크리스마스",
@@ -89,13 +90,7 @@ def normalize_and_synonym_filter(keyword):
 
 
 def correct_typo_fuzzy(keyword):
-    """
-    [센스 있게 튜닝된 가중치 오타 교정]
-    단순 글자 거리만 비교하는 맹점을 극복하기 위해,
-    실제 사용자가 검색한 빈도수(Sorted Set 스코어)가 높은 검증된 핵심 단어들을 우선 매칭함.
-    """
     input_jamo = get_jamo_string(keyword)
-    
     best_match = None
     min_distance = 9999
     max_score = -1 
@@ -104,28 +99,20 @@ def correct_typo_fuzzy(keyword):
         all_jamos = r.hgetall("saver:autocomplete:jamo_map")
         for j_key, real_val in all_jamos.items():
             dist = get_levenshtein_distance(input_jamo, j_key)
-            
-            # 교정 허용 범위: 3타 이하
             if dist <= 3:
-                # Redis Sorted Set에서 검색 빈도 스코어 획득
                 score = r.zscore("saver:popular_scores", real_val)
                 score = int(score) if score else 0
                 
-                # 시스템 마스터 데이터(기본 검색어)에는 강력한 기본 가중치 부여 (오인식 방지)
                 if real_val in ["날씨", "크리스마스", "학사", "캠퍼스", "뉴스", "블로그"]:
                     score += 1000
                 
-                # 1. 편집 거리가 가장 가까운 녀석을 선별
-                # 2. 거리가 같다면 검색 빈도가 높거나 마스터 가중치가 부여된 단어를 정밀 선별
                 if dist < min_distance:
                     min_distance = dist
                     best_match = real_val
                     max_score = score
-                elif dist == min_distance:
-                    if score > max_score:
-                        best_match = real_val
-                        max_score = score
-                        
+                elif dist == min_distance and score > max_score:
+                    best_match = real_val
+                    max_score = score
     except Exception as e:
         print(f"⚠️ 오타 교정 연산 실패: {e}")
         
@@ -133,14 +120,161 @@ def correct_typo_fuzzy(keyword):
 
 
 # ==========================================
-# [기능 고도화 3] 실시간 인기 검색어 TOP 10 랭킹 집계
+# [기능 고도화 2] 스마트 자연어 계산기 엔진
+# ==========================================
+def evaluate_math_expression_ai(keyword):
+    numbers = re.findall(r'\d+', keyword)
+    if not numbers:
+        return None
+
+    if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE":
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        headers = {"Content-Type": "application/json"}
+        prompt = (
+            f"사용자의 질문: '{keyword}'\n"
+            "위 문장에서 숫자와 연산의 의도를 파악하여, 파이썬 eval() 함수로 즉시 계산 가능한 순수 수학 수식 한 줄로만 변환해줘.\n"
+            "예시: '36000 나누기 3' -> 36000 / 3\n"
+            "예시: '2를 8번 곱해줘' -> 2 ** 8\n"
+            "주의: 설명이나 한글, 기호(`)를 전혀 붙이지 말고 오직 숫자와 파이썬 연산자(+, -, *, /, **)로만 구성된 한 줄만 출력해."
+        )
+        data = {"contents": [{"parts": [{"text": prompt}]}]}
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=3)
+            if response.status_code == 200:
+                ai_response = response.json()
+                raw_expr = ai_response['contents'][0]['parts'][0]['text'].strip()
+                clean_expr = raw_expr.replace("`", "").strip()
+                if re.match(r'^[\d+\-*/().\s]+$', clean_expr):
+                    result = eval(clean_expr)
+                    return {"type": "ai_calculator", "user_input": keyword, "parsed_expression": clean_expr, "result": str(result)}
+        except Exception:
+            pass
+
+    return fallback_math_expression(keyword)
+
+
+def fallback_math_expression(keyword):
+    """
+    모든 한글 변형 어미와 수사를 유연하게 수식으로 정밀 파싱하는 엔진
+    """
+    numbers = re.findall(r'\d+', keyword)
+    
+    # 한글 수사 지원
+    korean_num_map = {"둘이서": "2", "셋이서": "3", "네명이서": "4", "여섯이서": "6", "반띵": "2", "삼등분": "3"}
+    for k_word, num_str in korean_num_map.items():
+        if k_word in keyword and len(numbers) == 1:
+            numbers.append(num_str)
+
+    if len(numbers) >= 2:
+        num1, num2 = numbers[0], numbers[1]
+        
+        op = None
+        # 1. 거듭제곱 / 제곱 우선 판별 ("N번 곱", "제곱", "**")
+        if any(w in keyword for w in ["번 곱", "번곱", "제곱", "거듭제곱", "**"]):
+            op = "**"
+        # 2. 일반 나누기
+        elif any(w in keyword for w in ["나누", "나눠", "분", "쪼개", "N빵", "n빵", "/", "등분"]):
+            op = "/"
+        # 3. 일반 곱하기
+        elif any(w in keyword for w in ["곱", "배", "*"]):
+            op = "*"
+        # 4. 더하기
+        elif any(w in keyword for w in ["더", "합", "플러스", "+"]):
+            op = "+"
+        # 5. 빼기
+        elif any(w in keyword for w in ["빼", "차", "마이너스", "-"]):
+            op = "-"
+
+        if op:
+            parsed_expr = f"{num1} {op} {num2}"
+            try:
+                result = eval(parsed_expr)
+                return {
+                    "type": "smart_fallback_calculator",
+                    "expression": keyword,
+                    "parsed_expression": parsed_expr,
+                    "result": str(result)
+                }
+            except Exception:
+                return None
+    return None
+
+
+# ==========================================
+# [기능 고도화 3] 글로벌 날씨 확장 엔진
+# ==========================================
+def get_realtime_weather(city_name="Seoul"):
+    city_map = {
+        "서울": "Seoul", "부산": "Busan", "인천": "Incheon", 
+        "대구": "Daegu", "대전": "Daejeon", "광주": "Gwangju", 
+        "울산": "Ulsan", "제주": "Jeju", "뉴욕": "New York", 
+        "런던": "London", "도쿄": "Tokyo", "파리": "Paris",
+        "베이징": "Beijing", "시드니": "Sydney", "로스앤젤레스": "Los Angeles", 
+        "LA": "Los Angeles", "상하이": "Shanghai", "두바이": "Dubai", 
+        "싱가포르": "Singapore", "방콕": "Bangkok"
+    }
+    
+    target_city_en = city_map.get(city_name, "Seoul")
+    target_city_ko = city_name if city_name in city_map else "서울시"
+
+    if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "YOUR_API_KEY_HERE":
+        return {
+            "location": target_city_ko,
+            "temperature": "18.5°C" if city_name == "뉴욕" else "26.2°C" if city_name == "도쿄" else "24.5°C",
+            "status": "맑음 (Clear)" if city_name == "뉴욕" else "흐림 (Cloudy)",
+            "humidity": "60%",
+            "wind_speed": "2.4 m/s",
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "source": f"Mock ({target_city_ko} 글로벌 매칭 완공)"
+        }
+    
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={target_city_en}&appid={OPENWEATHER_API_KEY}&units=metric&lang=kr"
+    try:
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "location": target_city_ko,
+                "temperature": f"{data['main']['temp']:.1f}°C",
+                "status": data['weather'][0]['description'],
+                "humidity": f"{data['main']['humidity']}%",
+                "wind_speed": f"{data['wind']['speed']} m/s",
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "source": "OpenWeatherMap API"
+            }
+    except Exception:
+        pass
+    return {
+        "location": target_city_ko,
+        "temperature": "24.5°C",
+        "status": "통신 제한 호환 모드",
+        "humidity": "85%",
+        "wind_speed": "3.2 m/s",
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "source": "Fallback"
+    }
+
+
+def parse_weather_city(keyword):
+    cities = [
+        "서울", "부산", "인천", "대구", "대전", "광주", "울산", "제주", 
+        "뉴욕", "런던", "도쿄", "파리", "베이징", "시드니", "상하이", 
+        "두바이", "싱가포르", "방콕", "LA", "로스앤젤레스"
+    ]
+    for city in cities:
+        if city in keyword:
+            return city
+    return "서울"
+
+
+# ==========================================
+# [기능 고도화 4] 실시간 인기 검색어 TOP 10 랭킹 집계
 # ==========================================
 def get_realtime_trending_keywords():
     try:
         trending_raw = r.zrevrange("saver:popular_scores", 0, 9, withscores=True)
         trending_list = []
         for rank, (kw, score) in enumerate(trending_raw, 1):
-            # 대량 인덱싱으로 유입된 노이즈 단어가 인기 랭킹 상위에 오르는 것을 방지하기 위해 검색 2회 이상 필터링
             if int(score) >= 2:
                 trending_list.append({
                     "순위": rank,
@@ -177,65 +311,51 @@ def is_rate_limited(client_ip, limit=2, period=4):
 def get_jamo_string(text):
     return j2hcj(h2j(text))
 
+
 def initialize_autocomplete_database():
-    """
-    DB 전체 명사를 자동 스캔하여 사전을 무한 구축하되,
-    기본 마스터 키워드(학사, 크리스마스 등)에 대해 1000 스코어 가중치 세팅을 동시 보장함.
-    """
+    if r.exists("saver:autocomplete:jamo_map"):
+        print("⚡ [초고속 가동] 기존 등록된 Redis 사전을 즉시 로드합니다.")
+        return
+        
     print("🔄 [시스템] 데이터베이스 전체 스캔 및 포털급 단어 사전 자동 빌드 중...")
     
-    # 1. 필수 정밀 보정 키워드 셋 정의
     master_keywords = {
-        "날씨": 1000, 
-        "오늘 날씨": 1000, 
-        "날씨 정보": 1000, 
-        "블로그 포스트": 1000, 
-        "최신 뉴스": 1000, 
-        "계산기": 1000, 
-        "기념일": 1000, 
-        "크리스마스": 1000,
-        "학사": 1000,
-        "캠퍼스": 1000
+        "날씨": 1000, "오늘 날씨": 1000, "날씨 정보": 1000, 
+        "블로그 포스트": 1000, "최신 뉴스": 1000, "계산기": 1000, 
+        "기념일": 1000, "크리스마스": 1000, "학사": 1000, "캠퍼스": 1000
     }
     
     try:
-        # 1. 필수 마스터 데이터 및 우선 가중치 프리로드
         for kw, score in master_keywords.items():
             jamo_key = get_jamo_string(kw)
             r.hset("saver:autocomplete:jamo_map", jamo_key, kw)
             r.zadd("saver:popular_scores", {kw: score})
             
-        # 2. PostgreSQL Full-text 스캔 및 텍스트 파싱
         pg_cursor.execute("SELECT title, content FROM hufspress UNION ALL SELECT title, content FROM blog")
         rows = pg_cursor.fetchall()
         
         unique_words = set()
         for title, content in rows:
             combined_text = f"{title if title else ''} {content if content else ''}"
-            # 한글/영문 2글자 이상 핵심 명사 데이터 분리
             words = re.findall(r'[가-힣a-zA-Z0-9]{2,}', combined_text)
             for w in words:
-                # 조사 강제 트림
                 clean_w = re.sub(r'(은|는|이|가|을|를|에|와|과|에서|하고|이고)$', '', w)
                 if len(clean_w) >= 2:
                     unique_words.add(clean_w)
         
-        # 3. 추출 단어 Redis 대량 동기화
         pipeline = r.pipeline()
         for word in unique_words:
-            # 기존 마스터 키워드를 덮어쓰지 않도록 처리
             if word not in master_keywords:
                 jamo_key = get_jamo_string(word)
                 pipeline.hset("saver:autocomplete:jamo_map", jamo_key, word)
-                # 단순 인덱싱으로 자동 빌드된 무명 키워드는 기본 스코어 1로 제한(오인식 방지)
                 pipeline.zadd("saver:popular_scores", {word: 1})
         pipeline.execute()
         
         print(f"✅ [색인 완공] DB 기반 무한 검색 사전 구축 완료 (총 {len(unique_words)}개 유효 명사 정밀 인덱싱됨).")
     except Exception as e:
-        print(f"⚠️ 자동완성 사전 인덱서 가동 실패 (기본 모드로 전환): {e}")
+        print(f"⚠️ 자동완성 사전 인덱서 가동 실패: {e}")
 
-# 커넥션 수립 후 자동 빌드 기동
+
 initialize_autocomplete_database()
 
 
@@ -260,65 +380,6 @@ def search_autocomplete(keyword):
 
 
 # ==========================================
-# [기능 2] 다중 지역 동적 날씨 제공 엔진
-# ==========================================
-def get_realtime_weather(city_name="Seoul"):
-    city_map = {
-        "서울": "Seoul", "부산": "Busan", "인천": "Incheon", 
-        "대구": "Daegu", "대전": "Daejeon", "광주": "Gwangju", 
-        "울산": "Ulsan", "제주": "Jeju"
-    }
-    
-    target_city_en = city_map.get(city_name, "Seoul")
-    target_city_ko = city_name if city_name in city_map else "서울시"
-
-    if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "YOUR_API_KEY_HERE":
-        return {
-            "location": target_city_ko,
-            "temperature": "22.1°C" if city_name == "부산" else "24.5°C",
-            "status": "비 (Rainy)" if city_name == "부산" else "흐림 (Cloudy)",
-            "humidity": "90%" if city_name == "부산" else "85%",
-            "wind_speed": "4.1 m/s" if city_name == "부산" else "3.2 m/s",
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "source": f"Mock ({target_city_ko} 매칭 완공)"
-        }
-    
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={target_city_en}&appid={OPENWEATHER_API_KEY}&units=metric&lang=kr"
-    try:
-        response = requests.get(url, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                "location": target_city_ko,
-                "temperature": f"{data['main']['temp']:.1f}°C",
-                "status": data['weather'][0]['description'],
-                "humidity": f"{data['main']['humidity']}%",
-                "wind_speed": f"{data['wind']['speed']} m/s",
-                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-                "source": "OpenWeatherMap API"
-            }
-        else:
-            raise Exception()
-    except Exception:
-        return {
-            "location": target_city_ko,
-            "temperature": "24.5°C",
-            "status": "기상청 통신 제한",
-            "humidity": "85%",
-            "wind_speed": "3.2 m/s",
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "source": "Fallback"
-        }
-
-def parse_weather_city(keyword):
-    cities = ["서울", "부산", "인천", "대구", "대전", "광주", "울산", "제주"]
-    for city in cities:
-        if city in keyword:
-            return city
-    return "서울"
-
-
-# ==========================================
 # 기념일/디데이 연산 엔진
 # ==========================================
 def calculate_anniversary_dday(keyword):
@@ -333,7 +394,6 @@ def calculate_anniversary_dday(keyword):
     }
     
     weekday_map = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
-    
     target_event = None
     for key in anniversaries.keys():
         if key in keyword:
@@ -345,11 +405,10 @@ def calculate_anniversary_dday(keyword):
         
     target_date_str = anniversaries[target_event]
     target_date = datetime.strptime(target_date_str, "%Y-%m-%d")
-    current_date = datetime(2026, 7, 15)
+    current_date = datetime(2026, 7, 20)
     
     delta = target_date - current_date
     days_left = delta.days
-    
     weekday_name = weekday_map[target_date.weekday()]
     
     if days_left > 0:
@@ -371,24 +430,6 @@ def calculate_anniversary_dday(keyword):
         "message": f"{msg} {emoji}"
     }
 
-
-def evaluate_math_expression(keyword):
-    clean_keyword = keyword.replace(" ", "")
-    clean_keyword = re.sub(r'의?세제곱', '**3', clean_keyword)
-    clean_keyword = re.sub(r'의?제곱', '**2', clean_keyword)
-    math_pattern = r'^[\d+\-*/().\s]+$'
-    if re.match(math_pattern, clean_keyword):
-        try:
-            result = eval(clean_keyword)
-            if isinstance(result, (int, float)):
-                return {
-                    "type": "calculator",
-                    "expression": keyword,
-                    "result": str(result)
-                }
-        except Exception:
-            return None
-    return None
 
 def detect_user_intent(keyword):
     intent_map = {
@@ -413,16 +454,10 @@ def detect_user_intent(keyword):
     jamo_keyword = get_jamo_string(keyword)
     for target_id, info in intent_map.items():
         if target_id == "weather" and "ㄴㅆ" in jamo_keyword:
-            return {
-                "target_id": "weather",
-                "recommend_message": info["msg"]
-            }
+            return {"target_id": "weather", "recommend_message": info["msg"]}
         for kw in info["keywords"]:
             if kw in keyword:
-                return {
-                    "target_id": target_id,
-                    "recommend_message": info["msg"]
-                }
+                return {"target_id": target_id, "recommend_message": info["msg"]}
     return None
 
 
@@ -436,10 +471,22 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             "message": "너무 빠른 검색 요청이 감지되었습니다. 잠시 후 다시 시도해 주세요 (4초 내 최대 2회 제한)."
         }
 
-    # 1. 형태소 정규화
+    # 1. 오타 교정 전에 자연어 연산부터 우선 파싱
+    math_result = evaluate_math_expression_ai(raw_keyword)
+    if math_result:
+        start_time = time.time()
+        latency = (time.time() - start_time) * 1000
+        return {
+            "SAVER_Special_Search": {
+                "검색속도": f"{latency:.2f}ms",
+                "타입": "calculator",
+                "결과": math_result,
+                "추천_결과": None,
+                "연관_검색어_추천": []
+            }
+        }
+
     normalized_keyword = normalize_and_synonym_filter(raw_keyword)
-    
-    # 2. [오타 교정] 가중치 튜닝이 반영된 퍼지 교정 연산 가동
     keyword = correct_typo_fuzzy(normalized_keyword)
     
     if raw_keyword != keyword:
@@ -449,7 +496,6 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
     
     start_time = time.time()
     
-    # [캐시 레이어 검증]
     cache_key = f"saver:cache:{keyword}"
     try:
         cached_data = r.get(cache_key)
@@ -462,28 +508,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
     except Exception:
         pass
 
-    # --- Cache Miss 구간 ---
-    
-    # 계산기 처리
-    math_result = evaluate_math_expression(keyword)
-    if math_result:
-        latency = (time.time() - start_time) * 1000
-        output = {
-            "SAVER_Special_Search": {
-                "검색속도": f"{latency:.2f}ms",
-                "타입": "calculator",
-                "결과": math_result,
-                "추천_결과": None,
-                "연관_검색어_추천": []
-            }
-        }
-        try:
-            r.set(cache_key, json.dumps(output), ex=60)
-        except Exception:
-            pass
-        return output
-
-    # 의도 분석 처리
+    # 2. 의도 분석 처리 및 날씨/디데이 바인딩
     user_intent = detect_user_intent(keyword)
 
     if user_intent:
@@ -496,7 +521,6 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
 
         latency = (time.time() - start_time) * 1000
         related_keywords = search_autocomplete(keyword)
-        
         feedback_message = f"'{raw_keyword}'(으)로 입력된 오타를 교정하여 '{keyword}'의 결과를 보여줍니다." if raw_keyword != keyword else None
 
         output = {
@@ -517,20 +541,18 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
                 "연관_검색어_추천": related_keywords
             }
         }
-        
         try:
             r.set(cache_key, json.dumps(output), ex=60)
         except Exception:
             pass
-            
         return output
 
-    # 일반 키워드 자동완성 탐색
+    # 3. 일반 키워드 자동완성 탐색
     related_keywords = search_autocomplete(keyword)
     if not related_keywords:
         related_keywords = [f"{keyword} 추천", f"{keyword} 최신 뉴스", f"HUFS {keyword}"]
 
-    # PostgreSQL 통합 검색
+    # 4. PostgreSQL 통합 검색
     best_result = None
     try:
         query = """
@@ -546,7 +568,6 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
         if row:
             raw_content = row[2] if row[2] else ""
             summary_text = raw_content[:100] + "..." if len(raw_content) > 100 else raw_content
-            
             best_result = {
                 "게시처": row[0],
                 "제목": row[1],
@@ -560,12 +581,10 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
                 "제목": f"'{keyword}'에 대한 검색 결과가 없습니다.",
                 "요약본(100자)": "데이터베이스 내에 매칭되는 본문이 없습니다."
             }
-            
     except Exception as e:
         print(f"❌ [디비 에러] {e}")
 
     latency = (time.time() - start_time) * 1000
-
     feedback_message = f"'{raw_keyword}'(으)로 입력된 오타를 교정하여 '{keyword}'의 결과를 보여줍니다." if raw_keyword != keyword else None
 
     output = {
@@ -578,9 +597,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             "연관_검색어_추천": related_keywords
         }
     }
-    
     try:
-        # [방어 로직] 검색 결과가 존재하지 않는(None) 실패 결과는 절대로 Redis 캐시에 등록하지 않음!
         if best_result and best_result["게시처"] != "None":
             r.set(cache_key, json.dumps(output), ex=60)
     except Exception:
@@ -588,9 +605,10 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
 
     return output
 
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚡ SAVER Search Engine v5.7 (Ultimate Master Code)")
+    print("⚡ SAVER Search Engine v5.8 (Universal Math Parser)")
     print("=" * 60)
     
     try:
@@ -624,5 +642,7 @@ if __name__ == "__main__":
                 print(json.dumps(final_output, indent=4, ensure_ascii=False))
                 print("="*64)
     finally:
-        if pg_cursor: pg_cursor.close()
-        if pg_conn: pg_conn.close()
+        if pg_cursor:
+            pg_cursor.close()
+        if pg_conn:
+            pg_conn.close()
