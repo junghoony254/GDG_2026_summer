@@ -62,7 +62,7 @@ def get_jamo_string(text):
 
 
 # ==========================================
-# [신규 통합 엔진 1] 환율 계산 모듈
+# [신규 통합 엔진 1] 환율 계산 모듈 (원화 -> 타 통화 동적 환산 보강)
 # ==========================================
 def evaluate_currency_converter(keyword):
     # '파운드' 키워드가 들어왔을 때 '무게'나 'lbs' 맥락이면 환율에서 처리하지 않음
@@ -86,7 +86,7 @@ def evaluate_currency_converter(keyword):
     val, unit = matches[0]
     val = float(val)
 
-    # 파운드 -> 달러 환산 특수 처리
+    # 파운드 -> 달러 환산 특수 처리 ("225파운드를 달러로 바꿔줘")
     if ("파운드" in unit or "gbp" in unit) and "달러" in keyword:
         krw_val = val * rates["파운드"]
         usd_val = krw_val / rates["달러"]
@@ -101,8 +101,27 @@ def evaluate_currency_converter(keyword):
         krw_val = val * rates[unit]
         result_str = f"{val:,.0f}엔 = 약 {krw_val:,.0f}원 (KRW)"
     elif unit in ["원"]:
-        usd_val = val / rates["달러"]
-        result_str = f"{val:,.0f}원 = 약 {usd_val:,.2f}달러 (USD)"
+        # [수정 완공] 원화 -> 입력 문장 내 타겟 통화(파운드, 엔, 유로, 달러 등) 분기 연산
+        target_unit = "달러"
+        if "파운드" in keyword or "gbp" in keyword:
+            target_unit = "파운드"
+        elif "엔" in keyword or "jpy" in keyword:
+            target_unit = "엔"
+        elif "유로" in keyword or "eur" in keyword:
+            target_unit = "유로"
+        elif "위안" in keyword or "cny" in keyword:
+            target_unit = "위안"
+        elif "달러" in keyword or "usd" in keyword:
+            target_unit = "달러"
+
+        target_rate = rates[target_unit]
+        if target_unit in ["엔", "jpy"]:
+            calc_val = val / target_rate
+            result_str = f"{val:,.0f}원 = 약 {calc_val:,.0f}엔 (JPY)"
+        else:
+            calc_val = val / target_rate
+            unit_display = "GBP (파운드)" if target_unit == "파운드" else f"{target_unit.upper()}"
+            result_str = f"{val:,.0f}원 = 약 {calc_val:,.2f} {unit_display}"
     elif unit in rates:
         krw_val = val * rates[unit]
         result_str = f"{val:,.2f} {unit.upper()} = 약 {krw_val:,.0f}원 (KRW)"
@@ -118,7 +137,7 @@ def evaluate_currency_converter(keyword):
 
 
 # ==========================================
-# [신규 통합 엔진 2] 단위 변환기 모듈 (야드/미터 매칭 고도화)
+# [신규 통합 엔진 2] 단위 변환기 모듈
 # ==========================================
 def evaluate_unit_converter(keyword):
     # 통화 정밀 검사
@@ -441,7 +460,6 @@ initialize_autocomplete_database()
 
 def normalize_and_synonym_filter(keyword):
     clean_kw = keyword.strip()
-    # [수정 완공] 정규화 방지 단위 키워드에 야드, 미터, 인치 보강
     unit_preserve_keywords = ["시간", "몇시", "시차", "현재", "달러", "환율", "평", "cm", "kg", "lbs", "파운드", "야드", "미터", "인치"]
     if not any(w in clean_kw for w in unit_preserve_keywords):
         clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
@@ -535,7 +553,7 @@ def detect_user_intent(keyword):
 # ==========================================
 def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
     if is_rate_limited(client_ip, limit=2, period=4):
-        return {"error": "Too Many Requests", "message": "요청이 너무 빠릅니다. 잠시 후 다시 시도해 주세요."}
+        return {"error": "Too Many Requests", "message": "요청이 너무 빠급니다. 잠시 후 다시 시도해 주세요."}
 
     start_time = time.time()
 
@@ -562,7 +580,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
                 }
             }
 
-    # 2. 환율 계산기 특수 연산 (원본 키워드 기준 검사)
+    # 2. 환율 계산기 특수 연산
     curr_result = evaluate_currency_converter(raw_keyword)
     if curr_result:
         return {
@@ -573,7 +591,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             }
         }
 
-    # 3. 단위 변환기 특수 연산 (원본 키워드 기준 검사 - 야드, 미터, cm 등)
+    # 3. 단위 변환기 특수 연산
     unit_result = evaluate_unit_converter(raw_keyword)
     if unit_result:
         return {
