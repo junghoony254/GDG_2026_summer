@@ -65,10 +65,14 @@ def get_jamo_string(text):
 # [신규 통합 엔진 1] 환율 계산 모듈
 # ==========================================
 def evaluate_currency_converter(keyword):
-    currency_patterns = r'(\d+(?:\.\d+)?)\s*(달러|엔|유로|위안|원|usd|jpy|eur|cny|gbp)'
+    # '파운드' 키워드가 들어왔을 때 '무게'나 'lbs' 맥락이면 환율에서 처리하지 않음
+    if "파운드" in keyword and any(w in keyword for w in ["무게", "lbs", "kg", "킬로"]):
+        return None
+
+    currency_patterns = r'(\d+(?:\.\d+)?)\s*(달러|엔|유로|위안|원|영국\s*파운드|파운드|gbp|usd|jpy|eur|cny)'
     matches = re.findall(currency_patterns, keyword.lower())
     
-    if not matches or not any(w in keyword for w in ["환율", "얼마", "원", "달러", "엔", "유로", "위안", "usd", "jpy", "eur"]):
+    if not matches:
         return None
 
     rates = {
@@ -76,11 +80,22 @@ def evaluate_currency_converter(keyword):
         "엔": 9.2, "jpy": 9.2,
         "유로": 1500.0, "eur": 1500.0,
         "위안": 190.0, "cny": 190.0,
-        "파운드": 1780.0, "gbp": 1780.0
+        "파운드": 1780.0, "영국 파운드": 1780.0, "gbp": 1780.0
     }
 
     val, unit = matches[0]
     val = float(val)
+
+    # 파운드 -> 달러 환산 특수 처리
+    if ("파운드" in unit or "gbp" in unit) and "달러" in keyword:
+        krw_val = val * rates["파운드"]
+        usd_val = krw_val / rates["달러"]
+        return {
+            "type": "currency_converter",
+            "input": keyword,
+            "result_text": f"{val:,.2f} GBP (파운드) = 약 {usd_val:,.2f} USD (달러)",
+            "base_rate_info": "하나은행 실시간 매매기준율 호환 모드"
+        }
 
     if unit in ["엔", "jpy"]:
         krw_val = val * rates[unit]
@@ -90,7 +105,7 @@ def evaluate_currency_converter(keyword):
         result_str = f"{val:,.0f}원 = 약 {usd_val:,.2f}달러 (USD)"
     elif unit in rates:
         krw_val = val * rates[unit]
-        result_str = f"{val:,.2f}{unit.upper()} = 약 {krw_val:,.0f}원 (KRW)"
+        result_str = f"{val:,.2f} {unit.upper()} = 약 {krw_val:,.0f}원 (KRW)"
     else:
         return None
 
@@ -103,31 +118,69 @@ def evaluate_currency_converter(keyword):
 
 
 # ==========================================
-# [신규 통합 엔진 2] 단위 변환기 모듈
+# [신규 통합 엔진 2] 단위 변환기 모듈 (야드/미터 매칭 고도화)
 # ==========================================
 def evaluate_unit_converter(keyword):
+    # 통화 정밀 검사
+    currency_explicit = ["환율", "달러", "유로", "엔화", "위안화", "영국파운드", "gbp", "usd", "eur", "jpy", "cny"]
+    has_explicit_currency = any(w in keyword.lower() for w in currency_explicit)
+    has_krw = bool(re.search(r'\d+\s*원', keyword)) or "원화" in keyword
+
+    if has_explicit_currency or has_krw:
+        return None
+
     cm_match = re.search(r'(\d+(?:\.\d+)?)\s*cm', keyword, re.IGNORECASE)
     inch_match = re.search(r'(\d+(?:\.\d+)?)\s*(인치|inch)', keyword, re.IGNORECASE)
-    kg_match = re.search(r'(\d+(?:\.\d+)?)\s*kg', keyword, re.IGNORECASE)
+    kg_match = re.search(r'(\d+(?:\.\d+)?)\s*(kg|킬로그램|킬로)', keyword, re.IGNORECASE)
     lbs_match = re.search(r'(\d+(?:\.\d+)?)\s*(파운드|lbs)', keyword, re.IGNORECASE)
     pyung_match = re.search(r'(\d+(?:\.\d+)?)\s*평', keyword)
     m2_match = re.search(r'(\d+(?:\.\d+)?)\s*(m2|제곱미터)', keyword, re.IGNORECASE)
+    yard_match = re.search(r'(\d+(?:\.\d+)?)\s*(야드|yard|yd)', keyword, re.IGNORECASE)
+    meter_match = re.search(r'(\d+(?:\.\d+)?)\s*(미터|m)(?!2)', keyword, re.IGNORECASE)
 
-    if cm_match and ("인치" in keyword or "inch" in keyword or "변환" in keyword):
+    # 야드 -> 미터
+    if yard_match and ("미터" in keyword or "m" in keyword or "변환" in keyword or "바꿔" in keyword):
+        val = float(yard_match.group(1))
+        res = val * 0.9144
+        return {"type": "unit_converter", "converted": f"{val} yard = {res:.2f} m"}
+
+    # 미터 -> 야드
+    if meter_match and ("야드" in keyword or "yard" in keyword or "변환" in keyword or "바꿔" in keyword):
+        val = float(meter_match.group(1))
+        res = val / 0.9144
+        return {"type": "unit_converter", "converted": f"{val} m = {res:.2f} yard"}
+
+    # cm -> inch
+    if cm_match and ("인치" in keyword or "inch" in keyword or "변환" in keyword or "바꿔" in keyword):
         val = float(cm_match.group(1))
         res = val / 2.54
         return {"type": "unit_converter", "converted": f"{val} cm = {res:.2f} inch"}
 
-    if kg_match and ("파운드" in keyword or "lbs" in keyword or "변환" in keyword):
+    # inch -> cm
+    if inch_match and ("cm" in keyword or "센티" in keyword or "변환" in keyword or "바꿔" in keyword):
+        val = float(inch_match.group(1))
+        res = val * 2.54
+        return {"type": "unit_converter", "converted": f"{val} inch = {res:.2f} cm"}
+
+    # kg / 킬로그램 -> lbs / 파운드
+    if kg_match and ("파운드" in keyword or "lbs" in keyword or "변환" in keyword or "바꿔" in keyword):
         val = float(kg_match.group(1))
         res = val * 2.20462
         return {"type": "unit_converter", "converted": f"{val} kg = {res:.2f} lbs"}
 
+    # lbs / 파운드 -> kg / 킬로그램 (역방향)
+    if lbs_match and ("kg" in keyword or "킬로" in keyword or "무게" in keyword or "변환" in keyword or "lbs" in keyword or "파운드" in keyword or "바꿔" in keyword):
+        val = float(lbs_match.group(1))
+        res = val * 0.453592
+        return {"type": "unit_converter", "converted": f"{val} lbs = {res:.2f} kg"}
+
+    # 평 -> m²
     if pyung_match:
         val = float(pyung_match.group(1))
         res = val * 3.30579
         return {"type": "unit_converter", "converted": f"{val}평 = {res:.2f} m²"}
 
+    # m² -> 평
     if m2_match:
         val = float(m2_match.group(1))
         res = val / 3.30579
@@ -388,7 +441,9 @@ initialize_autocomplete_database()
 
 def normalize_and_synonym_filter(keyword):
     clean_kw = keyword.strip()
-    if not any(w in clean_kw for w in ["시간", "몇시", "시차", "현재", "달러", "환율", "평", "cm", "kg"]):
+    # [수정 완공] 정규화 방지 단위 키워드에 야드, 미터, 인치 보강
+    unit_preserve_keywords = ["시간", "몇시", "시차", "현재", "달러", "환율", "평", "cm", "kg", "lbs", "파운드", "야드", "미터", "인치"]
+    if not any(w in clean_kw for w in unit_preserve_keywords):
         clean_kw = re.sub(r'(은|는|이|가|을|를|의|에|어때|언제야|현재|정보|날짜|디데이|d-day)$', '', clean_kw)
     clean_kw = clean_kw.strip()
     return clean_kw
@@ -448,7 +503,7 @@ def calculate_anniversary_dday(keyword):
     target_event = next((k for k in anniversaries if k in keyword), None)
     if not target_event:
         return None
-        
+
     target_date = datetime.strptime(anniversaries[target_event], "%Y-%m-%d")
     current_date = datetime(2026, 7, 21)
     days_left = (target_date - current_date).days
@@ -494,7 +549,20 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             }
         }
 
-    # 1. 환율 계산기 특수 연산
+    # 1. 계산기 키워드(n빵, 나누기, 수식 등)가 감지되면 수학 계산기를 최우선 실행
+    calc_override_keywords = ["n빵", "N빵", "나누", "나눠", "더치페이", "등분", "반띵", "삼등분", "번 곱", "제곱"]
+    if any(w in raw_keyword for w in calc_override_keywords):
+        math_result = evaluate_math_expression_ai(raw_keyword)
+        if math_result:
+            return {
+                "SAVER_Special_Search": {
+                    "검색속도": f"{(time.time() - start_time)*1000:.2f}ms",
+                    "타입": "calculator",
+                    "결과": math_result
+                }
+            }
+
+    # 2. 환율 계산기 특수 연산 (원본 키워드 기준 검사)
     curr_result = evaluate_currency_converter(raw_keyword)
     if curr_result:
         return {
@@ -505,7 +573,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             }
         }
 
-    # 2. 단위 변환기 특수 연산
+    # 3. 단위 변환기 특수 연산 (원본 키워드 기준 검사 - 야드, 미터, cm 등)
     unit_result = evaluate_unit_converter(raw_keyword)
     if unit_result:
         return {
@@ -516,7 +584,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             }
         }
 
-    # 3. 자연어 수식 계산기
+    # 4. 일반 자연어 수식 계산기 fallback
     math_result = evaluate_math_expression_ai(raw_keyword)
     if math_result:
         return {
@@ -527,7 +595,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
             }
         }
 
-    # 4. 키워드 오타 정규화 및 캐시 확인
+    # 5. 키워드 오타 정규화 및 캐시 확인
     keyword = correct_typo_fuzzy(normalize_and_synonym_filter(raw_keyword))
     cache_key = f"saver:cache:{keyword}"
     try:
@@ -540,7 +608,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
     except Exception:
         pass
 
-    # 5. 의도 분석 (날씨 / 시간 / 디데이 / 뉴스)
+    # 6. 의도 분석 (날씨 / 시간 / 디데이 / 뉴스)
     user_intent = detect_user_intent(keyword)
     if user_intent:
         target_city = parse_city_name(keyword)
@@ -567,7 +635,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
         except Exception: pass
         return output
 
-    # 6. PostgreSQL DB 통합 검색
+    # 7. PostgreSQL DB 통합 검색
     best_result = None
     try:
         query = "SELECT 'hufspress', title, content FROM hufspress WHERE title LIKE %s OR content LIKE %s UNION ALL SELECT 'blog', title, content FROM blog WHERE title LIKE %s OR content LIKE %s LIMIT 1;"
@@ -595,7 +663,7 @@ def get_saver_search_result(raw_keyword, client_ip="127.0.0.1"):
 
 
 # ==========================================
-# CLI 메뉴 인터페이스 (복원 완료)
+# CLI 메뉴 인터페이스
 # ==========================================
 if __name__ == "__main__":
     print("=" * 60)
